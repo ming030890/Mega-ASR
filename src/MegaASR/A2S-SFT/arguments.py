@@ -42,6 +42,8 @@ def parse_args():
     p.add_argument("--save_total_limit", type=int, default=5)
     p.add_argument("--resume", type=int, default=0)
     p.add_argument("--resume_from", type=str, default="")
+    p.add_argument("--early_stopping_patience", type=int, default=0)
+    p.add_argument("--early_stopping_threshold", type=float, default=0.0)
 
     # lora
     p.add_argument("--use_lora", type=int, default=1)

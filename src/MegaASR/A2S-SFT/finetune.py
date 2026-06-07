@@ -1,5 +1,5 @@
 # coding=utf-8
-from transformers import TrainingArguments
+from transformers import EarlyStoppingCallback, TrainingArguments
 
 from arguments import parse_args
 from checkpointing import MakeCheckpointInferableCallback, find_latest_checkpoint
@@ -33,6 +33,9 @@ def build_training_args(args, use_bf16: bool):
         eval_strategy="steps",
         eval_steps=args.save_steps,
         do_eval=bool(args.eval_file),
+        load_best_model_at_end=bool(args.eval_file and args.early_stopping_patience > 0),
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         bf16=use_bf16,
         fp16=not use_bf16,
         ddp_find_unused_parameters=False,
@@ -57,6 +60,15 @@ def main():
     collator = Qwen3ASRCollator(processor=processor, sampling_rate=args.sr)
     training_args = build_training_args(args, use_bf16)
 
+    callbacks = [MakeCheckpointInferableCallback(args.model_path)]
+    if args.eval_file and args.early_stopping_patience > 0:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=args.early_stopping_patience,
+                early_stopping_threshold=args.early_stopping_threshold,
+            )
+        )
+
     trainer = MegaASRTrainer(
         model=model,
         args=training_args,
@@ -64,7 +76,7 @@ def main():
         eval_dataset=dataset.get("validation", None),
         data_collator=collator,
         processing_class=processor,
-        callbacks=[MakeCheckpointInferableCallback(args.model_path)],
+        callbacks=callbacks,
         processor=processor,
         base_model_path=args.model_path,
         merged_from_lora_path=args.merge_lora_into_base_from.strip(),
