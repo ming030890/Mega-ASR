@@ -1,4 +1,6 @@
 # coding=utf-8
+import os
+
 import torch
 from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import GenerationConfig
@@ -86,4 +88,28 @@ def apply_lora(model, args):
     )
     model.thinker = get_peft_model(model.thinker, lora_config)
     model.thinker.print_trainable_parameters()
+
+    trainable_names = [
+        name
+        for name, param in model.named_parameters()
+        if param.requires_grad
+    ]
+    if args.lora_scope == "llm":
+        forbidden = [
+            name
+            for name in trainable_names
+            if "audio_tower" in name or ".proj1" in name or ".proj2" in name or ".conv_out" in name
+        ]
+        if forbidden:
+            raise RuntimeError(
+                "llm LoRA scope unexpectedly made audio/projector parameters trainable:\n"
+                + "\n".join(forbidden[:50])
+            )
+
+    output_dir = getattr(args, "output_dir", "")
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "trainable_parameter_names.txt"), "w", encoding="utf-8") as f:
+            for name in trainable_names:
+                f.write(name + "\n")
     return model

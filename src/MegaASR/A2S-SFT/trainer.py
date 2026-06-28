@@ -3,6 +3,7 @@ import os
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from safetensors.torch import load_file as safe_load_file
 from transformers import Trainer
 
@@ -12,7 +13,8 @@ class MegaASRTrainer(Trainer):
 
     def __init__(self, *args, processor=None, base_model_path: str = "",
                  merged_from_lora_path: str = "", lr_encoder: float = 1e-5,
-                 lr_aligner: float = 1e-5, lr_llm: float = 1e-5, **kwargs):
+                 lr_aligner: float = 1e-5, lr_llm: float = 1e-5,
+                 per_example_target_loss: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self.processor = processor
         self.base_model_path = base_model_path
@@ -20,6 +22,7 @@ class MegaASRTrainer(Trainer):
         self.lr_encoder = lr_encoder
         self.lr_aligner = lr_aligner
         self.lr_llm = lr_llm
+        self.per_example_target_loss = per_example_target_loss
 
     def _prepare_inputs(self, inputs):
         inputs = super()._prepare_inputs(inputs)
@@ -30,6 +33,47 @@ class MegaASRTrainer(Trainer):
             if torch.is_tensor(v) and v.is_floating_point():
                 inputs[k] = v.to(dtype=dtype)
         return inputs
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        if not self.per_example_target_loss or "labels" not in inputs:
+            return super().compute_loss(model, inputs, return_outputs=return_outputs, **kwargs)
+
+        labels = inputs["labels"]
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        vocab_size = shift_logits.size(-1)
+
+        target_mask = shift_labels.ne(-100)
+        active_examples = target_mask.any(dim=1)
+        example_token_counts = target_mask.sum(dim=1).clamp_min(1)
+
+        flat_labels = shift_labels.view(-1)
+        active_positions = flat_labels.ne(-100)
+        example_losses = shift_logits.new_zeros(shift_labels.size(0))
+        if active_positions.any():
+            flat_losses = F.cross_entropy(
+                shift_logits.view(-1, vocab_size)[active_positions],
+                flat_labels[active_positions],
+                reduction="none",
+            )
+            example_ids = (
+                torch.arange(shift_labels.size(0), device=shift_labels.device)
+                .unsqueeze(1)
+                .expand_as(shift_labels)
+                .reshape(-1)[active_positions]
+            )
+            example_losses.scatter_add_(0, example_ids, flat_losses)
+            example_losses = example_losses / example_token_counts
+
+        if active_examples.any():
+            loss = example_losses[active_examples].mean()
+        else:
+            loss = example_losses.mean()
+
+        return (loss, outputs) if return_outputs else loss
 
     def save_model(self, output_dir: Optional[str] = None, _internal_call: bool = False):
         output_dir = output_dir or self.args.output_dir

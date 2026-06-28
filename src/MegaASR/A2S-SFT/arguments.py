@@ -30,6 +30,7 @@ def parse_args():
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--log_steps", type=int, default=10)
     p.add_argument("--report_to", type=str, default="none")
+    p.add_argument("--per_example_target_loss", type=int, default=0)
 
     # dataloader
     p.add_argument("--num_workers", type=int, default=4)
