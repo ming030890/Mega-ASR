@@ -1,5 +1,6 @@
 # coding=utf-8
 import inspect
+from pathlib import Path
 
 import torch
 from transformers import EarlyStoppingCallback, TrainingArguments
@@ -11,6 +12,14 @@ from dataloader import Qwen3ASRCollator, build_datasets
 from metrics import build_compute_target_metrics
 from modeling import apply_lora, load_qwen3_asr
 from trainer import MegaASRTrainer
+
+
+def best_model_metric_name(eval_file: str) -> str:
+    eval_files = [value.strip() for value in eval_file.split(",") if value.strip()]
+    if len(eval_files) <= 1:
+        return "eval_loss"
+    primary_name = Path(eval_files[0]).name.removesuffix(".jsonl")
+    return f"eval_{primary_name}_loss"
 
 
 def build_training_args(args, use_bf16: bool):
@@ -66,7 +75,7 @@ def build_training_args(args, use_bf16: bool):
         eval_steps=args.save_steps,
         do_eval=bool(args.eval_file),
         load_best_model_at_end=load_best_model_at_end,
-        metric_for_best_model="eval_loss",
+        metric_for_best_model=best_model_metric_name(args.eval_file),
         greater_is_better=False,
         bf16=use_bf16,
         fp16=not use_bf16,
