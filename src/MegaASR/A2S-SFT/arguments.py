@@ -27,6 +27,7 @@ def parse_args():
     p.add_argument("--weight_decay", type=float, default=0.0)
     p.add_argument("--warmup_ratio", type=float, default=0.03)
     p.add_argument("--lr_scheduler_type", type=str, default="linear")
+    p.add_argument("--lr_scheduler_min_lr_rate", type=float, default=0.0)
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--log_steps", type=int, default=10)
     p.add_argument("--report_to", type=str, default="none")

@@ -18,6 +18,17 @@ def audio_messages(prompt: str):
     ]
 
 
+ASR_TEXT_MARKER = "<asr_text>"
+
+
+def forced_asr_prefix(text: str) -> str:
+    marker_start = text.find(ASR_TEXT_MARKER)
+    if marker_start < 0:
+        return ""
+    marker_end = marker_start + len(ASR_TEXT_MARKER)
+    return text[:marker_end]
+
+
 @dataclass
 class Qwen3ASRCollator:
     processor: Any
@@ -39,6 +50,10 @@ class Qwen3ASRCollator:
 
         eos = self.processor.tokenizer.eos_token or ""
         full_texts = [p + t + eos for p, t in zip(prefixes, targets)]
+        label_prefixes = [
+            p + forced_asr_prefix(t)
+            for p, t in zip(prefixes, targets)
+        ]
 
         batch = self.processor(
             text=full_texts,
@@ -48,7 +63,7 @@ class Qwen3ASRCollator:
             truncation=False,
         )
         prefix_batch = self.processor(
-            text=prefixes,
+            text=label_prefixes,
             audio=audios,
             return_tensors="pt",
             padding=True,
@@ -77,5 +92,11 @@ class Qwen3ASRCollator:
 def build_datasets(train_file: str, eval_file: str = ""):
     files = {"train": train_file}
     if eval_file:
-        files["validation"] = eval_file
+        eval_files = [value.strip() for value in eval_file.split(",") if value.strip()]
+        if len(eval_files) == 1:
+            files["validation"] = eval_files[0]
+        else:
+            for path in eval_files:
+                name = path.rsplit("/", 1)[-1].removesuffix(".jsonl")
+                files[f"validation_{name}"] = path
     return load_dataset("json", data_files=files)

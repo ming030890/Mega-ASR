@@ -1,11 +1,14 @@
 # coding=utf-8
-import numpy as np
+import inspect
+
 import torch
 from transformers import EarlyStoppingCallback, TrainingArguments
+from transformers.trainer_utils import SchedulerType
 
 from arguments import parse_args
 from checkpointing import MakeCheckpointInferableCallback, find_latest_checkpoint
 from dataloader import Qwen3ASRCollator, build_datasets
+from metrics import build_compute_target_metrics
 from modeling import apply_lora, load_qwen3_asr
 from trainer import MegaASRTrainer
 
@@ -21,6 +24,25 @@ def build_training_args(args, use_bf16: bool):
         and not bool(args.use_lora)
     )
 
+    scheduler_type = args.lr_scheduler_type
+    supported_schedulers = {item.value for item in SchedulerType}
+    if scheduler_type not in supported_schedulers:
+        print(
+            f"[scheduler] {scheduler_type!r} is not supported by this Transformers "
+            "version; falling back to 'cosine'"
+        )
+        scheduler_type = "cosine"
+
+    training_kwargs = {}
+    if (
+        scheduler_type == "cosine_with_min_lr"
+        and args.lr_scheduler_min_lr_rate > 0
+        and "lr_scheduler_kwargs" in inspect.signature(TrainingArguments.__init__).parameters
+    ):
+        training_kwargs["lr_scheduler_kwargs"] = {
+            "min_lr_rate": args.lr_scheduler_min_lr_rate,
+        }
+
     return TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.batch_size,
@@ -28,7 +50,7 @@ def build_training_args(args, use_bf16: bool):
         learning_rate=args.lr,
         num_train_epochs=args.epochs,
         logging_steps=args.log_steps,
-        lr_scheduler_type=args.lr_scheduler_type,
+        lr_scheduler_type=scheduler_type,
         warmup_ratio=args.warmup_ratio,
         weight_decay=args.weight_decay,
         max_grad_norm=args.max_grad_norm,
@@ -52,6 +74,7 @@ def build_training_args(args, use_bf16: bool):
         remove_unused_columns=False,
         report_to=report_to,
         run_name="Mega-ASR-A2S-SFT",
+        **training_kwargs,
     )
 
 
@@ -61,33 +84,15 @@ def preprocess_logits_for_metrics(logits, labels):
     return torch.argmax(logits, dim=-1)
 
 
-def compute_target_metrics(eval_pred):
-    predictions, labels = eval_pred
-    pred_ids = np.asarray(predictions)
-    label_ids = np.asarray(labels)
-
-    if pred_ids.ndim == 3:
-        pred_ids = pred_ids.argmax(axis=-1)
-
-    pred_ids = pred_ids[:, :-1]
-    label_ids = label_ids[:, 1:]
-    target_mask = label_ids != -100
-    target_tokens = int(target_mask.sum())
-    if target_tokens == 0:
-        return {
-            "target_token_accuracy": 0.0,
-            "target_exact_match": 0.0,
-            "target_tokens_per_example": 0.0,
-        }
-
-    token_matches = (pred_ids == label_ids) & target_mask
-    active_examples = target_mask.any(axis=1)
-    exact_by_example = (token_matches | ~target_mask).all(axis=1)
-
+def validation_datasets(dataset):
+    validation_keys = [key for key in dataset.keys() if key.startswith("validation")]
+    if not validation_keys:
+        return None
+    if validation_keys == ["validation"]:
+        return dataset["validation"]
     return {
-        "target_token_accuracy": float(token_matches.sum() / target_tokens),
-        "target_exact_match": float(exact_by_example[active_examples].mean()),
-        "target_tokens_per_example": float(target_mask.sum(axis=1)[active_examples].mean()),
+        key.removeprefix("validation_"): dataset[key]
+        for key in sorted(validation_keys)
     }
 
 
@@ -124,9 +129,9 @@ def main():
         model=model,
         args=training_args,
         train_dataset=dataset["train"],
-        eval_dataset=dataset.get("validation", None),
+        eval_dataset=validation_datasets(dataset),
         data_collator=collator,
-        compute_metrics=compute_target_metrics if args.eval_file else None,
+        compute_metrics=build_compute_target_metrics(processor) if args.eval_file else None,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics if args.eval_file else None,
         processing_class=processor,
         callbacks=callbacks,
